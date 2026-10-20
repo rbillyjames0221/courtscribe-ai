@@ -8,12 +8,18 @@ import { uid } from '@/lib/id'
 import { AudioCapture, LevelMeter, openMic } from '@/lib/audio/capture'
 import { editText, manualSegment, mergeProviderResult, nextSeq, setSpeaker as setSegSpeaker, settleInterims, sortSegments } from '@/lib/segments'
 import { createProvider, type ProviderId } from '@/lib/speech'
-import type { ProviderError, ProviderResultWithHint, ProviderStatus, SpeechProvider } from '@/lib/speech/provider'
+import { needsExclusiveMic } from '@/lib/speech/env'
+import { WhisperLiveProvider } from '@/lib/speech/whisper'
+import { isModelCached } from '@/lib/whisper/client'
+import { coveredByOther } from '@/lib/whisper/results'
+import type { ProviderError, ProviderInfo, ProviderResultWithHint, ProviderStatus, SpeechProvider } from '@/lib/speech/provider'
 import type { Bookmark, BookmarkType, Language, Segment, Session } from '@/lib/types'
 import { useSettings } from './settings'
 import { useSessions } from './sessions'
 
 export type Phase = 'idle' | 'starting' | 'recording' | 'paused' | 'stopping' | 'error'
+/** recording: audio saved locally · transcription-priority: live recognizer owns the mic, no audio saved · none: audio saving off */
+export type AudioMode = 'recording' | 'transcription-priority' | 'none'
 
 type LiveState = {
   session: Session | null
@@ -33,6 +39,18 @@ type LiveState = {
   currentSpeakerId: string | null
   level: number
   online: boolean
+  audioMode: AudioMode
+  audioModeReason?: string
+  /** The recognizer reports silence while the mic meter shows sound (mic contention) and auto-switching is off. */
+  contention?: string
+  speechActivity: 'idle' | 'sound' | 'speech' | 'silence'
+  noSpeechCount: number
+  recognizerLang?: string
+  lastResultAt?: number
+  resultCount: number
+  model?: { state: 'loading' | 'ready' | 'error'; loaded?: number; total?: number; message?: string }
+  fallbackActive: boolean
+  setAudioPriority: (mode: 'transcription' | 'both', reason?: string) => Promise<void>
   start: (session: Session, opts?: { resume?: boolean }) => Promise<boolean>
   pause: () => Promise<void>
   resume: () => Promise<void>
@@ -53,6 +71,12 @@ let capture: AudioCapture | null = null
 let meter: LevelMeter | null = null
 let provider: SpeechProvider | null = null
 let unsubs: (() => void)[] = []
+let fallback: SpeechProvider | null = null
+let fallbackUnsubs: (() => void)[] = []
+let captureRun = 0
+let releasingMic = false
+let peakLevel = 0
+let peakAt = 0
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let checkpointTimer: ReturnType<typeof setInterval> | null = null
 let flushTimer: ReturnType<typeof setTimeout> | null = null
@@ -117,6 +141,7 @@ export const useLive = create<LiveState>((set, get) => {
   const onResult = (r: ProviderResultWithHint) => {
     const { session, segments, currentSpeakerId } = get()
     if (!session) return
+    set({ lastResultAt: Date.now(), resultCount: get().resultCount + 1, noSpeechCount: 0, contention: undefined })
     let speakerId = currentSpeakerId
     // Demo script only: use its role hint when a participant with that role exists.
     if (provider?.id === 'mock' && r.speakerRoleHint) {
@@ -135,19 +160,68 @@ export const useLive = create<LiveState>((set, get) => {
     scheduleFlush(r.isFinal ? 150 : 1500)
   }
 
+  const onInfo = (i: ProviderInfo) => {
+    if (i.type === 'activity') set({ speechActivity: i.state })
+    else if (i.type === 'language') set({ recognizerLang: i.lang, notice: i.fallbackFrom ? `Recognition language ${i.fallbackFrom} is not available in this browser — using ${i.lang} instead.` : get().notice })
+    else if (i.type === 'model') set({ model: { state: i.state, loaded: i.loaded, total: i.total, message: i.message } })
+    else if (i.type === 'lag') set({ notice: 'This device is transcribing slower than real time; some blocks were skipped. Use "Transcribe recording" in Review afterwards to fill them in.' })
+    else if (i.type === 'no-speech') {
+      set({ noSpeechCount: i.count })
+      // The recognizer hears silence while our own meter clearly shows sound → it is not getting the mic.
+      if (i.count >= 2 && get().audioMode === 'recording' && Date.now() - peakAt < 12_000 && peakLevel > 0.12) void onContention('Speech recognition hears silence while the microphone level shows sound.')
+    } else if (i.type === 'mic-contention') void onContention('Speech recognition reported that the microphone is busy.')
+  }
+
+  const onContention = async (reason: string) => {
+    if (get().audioMode !== 'recording' || provider?.id !== 'webspeech') return
+    if (useSettings.getState().audioStrategy === 'auto') await get().setAudioPriority('transcription', reason)
+    else set({ contention: reason })
+  }
+
   const attachProvider = async (id: ProviderId, language: Language) => {
     const s = get().session!
-    provider = createProvider(id)
-    unsubs.push(provider.receiveInterimResult(onResult), provider.receiveFinalResult(onResult))
+    const st = useSettings.getState()
+    provider = createProvider(id, { whisperModel: st.whisperModel, whisperDevice: st.whisperDevice, whisperWindowSec: st.whisperWindowSec })
+    unsubs.push(provider.receiveInterimResult(onResult), provider.receiveFinalResult(onResult), provider.onInfo(onInfo))
     unsubs.push(
       provider.onStatus((st, err) => {
         set({ providerStatus: st, providerError: err && err.code !== 'no-speech' ? err : st === 'listening' ? undefined : get().providerError })
       }),
     )
-    await provider.startSession({ language, glossary: s.glossary, clock: () => capture?.clock() ?? 0 })
+    set({ recognizerLang: undefined, speechActivity: 'idle', noSpeechCount: 0 })
+    await provider.startSession({ language, glossary: s.glossary, clock: () => capture?.clock() ?? 0, stream })
+    // Gap-filler: on-device Whisper alongside browser live recognition, only when audio is being
+    // recorded and the model is already downloaded (never a surprise download).
+    if (id === 'webspeech' && stream && st.whisperLiveFallback && (await isModelCached(st.whisperModel).catch(() => false))) await attachFallback(language)
+  }
+
+  const attachFallback = async (language: Language) => {
+    await detachFallback()
+    const st = useSettings.getState()
+    const s = get().session
+    if (!s || !stream) return
+    const fb = new WhisperLiveProvider(st.whisperModel, st.whisperDevice, Math.max(st.whisperWindowSec, 12), 'whf')
+    fallback = fb
+    const accept = (r: ProviderResultWithHint) => {
+      // Only fill gaps: drop Whisper text where live recognition already produced text.
+      if (coveredByOther(get().segments, r.startMs, r.endMs)) return
+      onResult(r)
+    }
+    fallbackUnsubs.push(fb.receiveFinalResult(accept), fb.onInfo((i) => i.type === 'model' && set({ model: { state: i.state, loaded: i.loaded, total: i.total, message: i.message } })))
+    set({ fallbackActive: true })
+    await fb.startSession({ language, glossary: s.glossary, clock: () => capture?.clock() ?? 0, stream })
+  }
+  const detachFallback = async () => {
+    const f = fallback
+    fallback = null
+    fallbackUnsubs.forEach((u) => u())
+    fallbackUnsubs = []
+    set({ fallbackActive: false })
+    await f?.finishSession().catch(() => {})
   }
 
   const detachProvider = async () => {
+    await detachFallback()
     const p = provider
     provider = null
     unsubs.forEach((u) => u())
@@ -174,14 +248,61 @@ export const useLive = create<LiveState>((set, get) => {
     if (document.visibilityState === 'hidden') void checkpoint()
   }
 
+  const onChunk = (blob: Blob, meta: { startMs: number; endMs: number; mimeType: string }) => {
+    const s = get().session
+    if (!s) return
+    const seq = ++chunkSeq
+    const run = captureRun
+    set({ saveStatus: 'saving' })
+    void enqueue(async () => {
+      try {
+        await repo.addChunk({ id: `${s.id}:${seq}`, sessionId: s.id, seq, run, startMs: meta.startMs, endMs: meta.endMs, mimeType: meta.mimeType, size: blob.size, blob, createdAt: Date.now() })
+        set((st) => ({ chunkCount: st.chunkCount + 1, bytes: st.bytes + blob.size, saveStatus: 'saved', lastSavedAt: Date.now(), saveError: undefined }))
+      } catch (e) {
+        set({ saveStatus: 'error', saveError: e instanceof Error ? e.message : 'Could not save audio (storage full?)' })
+      }
+    })
+    void checkpoint()
+    if (provider?.consumesAudio) provider.sendAudio(blob, { seq, ...meta })
+  }
+
+  /** (Re)build the capture pipeline. withMic=false: the live recognizer gets the microphone to itself. */
+  const buildCapture = async (withMic: boolean, recordAudio: boolean, offset: number) => {
+    const settings = useSettings.getState()
+    if (withMic) {
+      stream = await openMic({ echoCancellation: settings.echoCancellation, noiseSuppression: settings.noiseSuppression, autoGainControl: settings.autoGainControl })
+      meter = new LevelMeter(stream)
+      const mine = stream
+      stream.getAudioTracks().forEach((t) =>
+        t.addEventListener('ended', () => {
+          if (releasingMic || stream !== mine) return
+          if (get().phase === 'recording' || get().phase === 'paused') {
+            set({ notice: 'Microphone was disconnected or taken by another app. Everything up to now is saved — press Resume to continue.' })
+            void get().pause()
+          }
+        }),
+      )
+    } else {
+      stream = null
+      meter = null
+    }
+    capture = new AudioCapture(stream, offset, onChunk, Math.max(1, settings.chunkSeconds) * 1000, recordAudio)
+  }
+
+  const releaseMic = () => {
+    releasingMic = true
+    stream?.getTracks().forEach((t) => t.stop())
+    releasingMic = false
+    stream = null
+    meter?.close()
+    meter = null
+  }
+
   const cleanup = () => {
     if (tickTimer) clearInterval(tickTimer)
     if (checkpointTimer) clearInterval(checkpointTimer)
     tickTimer = checkpointTimer = null
-    stream?.getTracks().forEach((t) => t.stop())
-    stream = null
-    meter?.close()
-    meter = null
+    releaseMic()
     capture = null
     void wakeLock?.release().catch(() => {})
     wakeLock = null
@@ -204,6 +325,51 @@ export const useLive = create<LiveState>((set, get) => {
     currentSpeakerId: null,
     level: 0,
     online: typeof navigator === 'undefined' ? true : navigator.onLine,
+    audioMode: 'recording',
+    speechActivity: 'idle',
+    noSpeechCount: 0,
+    resultCount: 0,
+    fallbackActive: false,
+
+    setAudioPriority: async (mode, reason) => {
+      const s = get().session
+      if (!s || !capture || (get().phase !== 'recording' && get().phase !== 'paused')) return
+      const paused = get().phase === 'paused'
+      const offset = capture.clock()
+      const wantsAudio = s.storageMode === 'local' && s.recordingSource === 'microphone'
+      if (mode === 'transcription') {
+        if (get().audioMode === 'transcription-priority') return
+        await detachProvider()
+        await capture.stop() // flushes the last audio chunk
+        releaseMic()
+        await buildCapture(false, false, offset)
+        set({ audioMode: 'transcription-priority', audioModeReason: reason ?? 'You chose transcription priority.', contention: undefined, notice: reason ? `Switched to transcription priority: ${reason} Live text now has the microphone; audio from here on is not saved.` : undefined })
+        await persistSession({ transcriptionPriority: true })
+      } else {
+        if (get().audioMode !== 'transcription-priority') return
+        await detachProvider()
+        captureRun += 1 // a new MediaRecorder file
+        try {
+          await buildCapture(true, wantsAudio, offset)
+        } catch (e) {
+          await buildCapture(false, false, offset)
+          set({ notice: `Could not open the microphone for recording: ${(e as Error).message}` })
+          if (s.mode !== 'steno') await attachProvider(s.providerId as ProviderId, s.language)
+          return
+        }
+        set({ audioMode: wantsAudio ? 'recording' : 'none', audioModeReason: undefined, contention: undefined, notice: needsExclusiveMic() ? 'Recording audio again. On Android, live text may stop while audio is recorded — switch to On-device Whisper for both.' : undefined })
+        await persistSession({ runCount: captureRun })
+      }
+      if (!paused) capture!.start()
+      else {
+        capture!.start()
+        capture!.pause()
+      }
+      if (s.mode !== 'steno') {
+        await attachProvider(s.providerId as ProviderId, s.language)
+        if (paused) provider?.pause()
+      }
+    },
 
     start: async (input, opts) => {
       const cur = get()
@@ -218,40 +384,21 @@ export const useLive = create<LiveState>((set, get) => {
         const lastSegEnd = settled.reduce((m, s) => Math.max(m, s.endMs), 0)
         const offset = opts?.resume ? Math.max(input.durationMs, stats.lastEnd, lastSegEnd) : Math.max(stats.lastEnd, input.durationMs)
 
-        stream = await openMic({ echoCancellation: settings.echoCancellation, noiseSuppression: settings.noiseSuppression, autoGainControl: settings.autoGainControl })
-        meter = new LevelMeter(stream)
-        const run = (input.runCount ?? 0) + 1
-        const recordAudio = input.storageMode === 'local' && input.recordingSource === 'microphone'
-        capture = new AudioCapture(
-          stream,
-          offset,
-          (blob, meta) => {
-            const s = get().session
-            if (!s) return
-            const seq = ++chunkSeq
-            set({ saveStatus: 'saving' })
-            void enqueue(async () => {
-              try {
-                await repo.addChunk({ id: `${s.id}:${seq}`, sessionId: s.id, seq, run, startMs: meta.startMs, endMs: meta.endMs, mimeType: meta.mimeType, size: blob.size, blob, createdAt: Date.now() })
-                set((st) => ({ chunkCount: st.chunkCount + 1, bytes: st.bytes + blob.size, saveStatus: 'saved', lastSavedAt: Date.now(), saveError: undefined }))
-              } catch (e) {
-                set({ saveStatus: 'error', saveError: e instanceof Error ? e.message : 'Could not save audio (storage full?)' })
-              }
-            })
-            void checkpoint()
-            if (provider?.consumesAudio) provider.sendAudio(blob, { seq, ...meta })
-          },
-          Math.max(1, settings.chunkSeconds) * 1000,
-          recordAudio,
-        )
-        stream.getAudioTracks().forEach((t) =>
-          t.addEventListener('ended', () => {
-            if (get().phase === 'recording' || get().phase === 'paused') {
-              set({ notice: 'Microphone was disconnected or taken by another app. Everything up to now is saved — press Resume to continue.' })
-              void get().pause()
-            }
-          }),
-        )
+        const wantsAudio = input.storageMode === 'local' && input.recordingSource === 'microphone'
+        const liveRecognizer = input.mode !== 'steno' && input.providerId === 'webspeech'
+        const strategy = settings.audioStrategy
+        // Android Chrome cannot give the mic to both MediaRecorder and SpeechRecognition: live text wins.
+        const exclusive = liveRecognizer && (strategy === 'transcription' || (strategy === 'auto' && needsExclusiveMic()))
+        captureRun = (input.runCount ?? 0) + 1
+        await buildCapture(!exclusive, wantsAudio && !exclusive, offset)
+        set({
+          audioMode: exclusive ? 'transcription-priority' : wantsAudio ? 'recording' : 'none',
+          audioModeReason: exclusive ? (strategy === 'transcription' ? 'Transcription priority is selected in Settings.' : 'Android Chrome cannot record audio and run live speech recognition at the same time.') : undefined,
+          contention: undefined,
+          resultCount: 0,
+          lastResultAt: undefined,
+        })
+        if (exclusive) await persistSession({ transcriptionPriority: true })
         set({
           segments: sortSegments(settled),
           bookmarks: existingMarks.sort((a, b) => a.atMs - b.atMs),
@@ -260,11 +407,17 @@ export const useLive = create<LiveState>((set, get) => {
           currentSpeakerId: get().currentSpeakerId && input.participants.some((p) => p.id === get().currentSpeakerId) ? get().currentSpeakerId : (input.participants[0]?.id ?? null),
           elapsedMs: offset,
         })
-        await persistSession({ status: 'recording', startedAt: input.startedAt ?? Date.now(), runCount: run, durationMs: offset })
-        capture.start()
+        await persistSession({ status: 'recording', startedAt: input.startedAt ?? Date.now(), runCount: captureRun, durationMs: offset })
+        capture!.start()
         if (input.mode !== 'steno') await attachProvider(input.providerId as ProviderId, input.language)
         tickTimer = setInterval(() => {
-          if (capture) set({ elapsedMs: capture.clock(), level: get().phase === 'recording' ? (meter?.level() ?? 0) : 0 })
+          if (!capture) return
+          const level = get().phase === 'recording' ? (meter?.level() ?? 0) : 0
+          if (level > 0.12) {
+            peakLevel = level
+            peakAt = Date.now()
+          }
+          set({ elapsedMs: capture.clock(), level })
         }, 150)
         checkpointTimer = setInterval(() => void checkpoint(), 5000)
         window.addEventListener('beforeunload', onBeforeUnload)
@@ -302,7 +455,7 @@ export const useLive = create<LiveState>((set, get) => {
 
     resume: async () => {
       if (get().phase !== 'paused') return
-      if (!stream || stream.getAudioTracks().every((t) => t.readyState === 'ended')) {
+      if (get().audioMode !== 'transcription-priority' && (!stream || stream.getAudioTracks().every((t) => t.readyState === 'ended'))) {
         // mic was lost: restart a new capture run on the same timeline
         const s = get().session!
         cleanup()

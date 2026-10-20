@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ArrowLeft, Check, Download, FastForward, History, ListFilter, Mic, Pause, PencilLine, Play, Plus, Redo2, Replace, Rewind, Search, Trash2, Undo2, Bookmark as BookmarkIcon, Volume2,
 } from 'lucide-react'
@@ -22,12 +22,14 @@ import { Input, Select, Textarea } from '@/components/ui/field'
 import { Banner, EmptyState, ErrorState, LoadingState } from '@/components/ui/states'
 import { SegmentRow, speakerName } from '@/components/Transcript'
 import { Disclaimer } from '@/components/Disclaimer'
+import { TranscribePanel } from '@/components/TranscribePanel'
 
 type UndoEntry = { segmentId: string; before: Segment; label: string }
 
 export default function Review() {
   const { id = '' } = useParams()
   const nav = useNavigate()
+  const [search] = useSearchParams()
   const settings = useSettings()
   const liveId = useLive((s) => s.session?.id)
   const [session, setSession] = useState<Session | null>(null)
@@ -325,7 +327,7 @@ export default function Review() {
       {/* Player */}
       <section aria-label="Audio playback" className="sticky top-0 z-10 -mx-3 mt-3 border-y border-border bg-surface/95 px-3 py-3 backdrop-blur sm:mx-0 sm:rounded-2xl sm:border">
         {runs.length === 0 ? (
-          <p className="flex items-center gap-2 py-2 text-sm text-muted"><Volume2 className="size-4" /> No audio was stored for this session (transcript-only mode or not yet saved).</p>
+          <p className="flex items-center gap-2 py-2 text-sm text-muted"><Volume2 className="size-4" /> {session.transcriptionPriority ? 'No audio was stored — this session ran in transcription priority (live text had the microphone).' : 'No audio was stored for this session (transcript-only mode or not yet saved).'}</p>
         ) : (
           <>
             <div className="relative h-12 w-full">
@@ -411,10 +413,14 @@ export default function Review() {
         </div>
       )}
 
+      {session.id !== liveId && (
+        <TranscribePanel session={session} segmentCount={segments.length} hasAudio={runs.length > 0} autoStart={search.get('transcribe') === '1'} onChanged={() => void repo.segments(id).then((x) => setSegments(sortSegments(x)))} />
+      )}
+
       {/* Transcript */}
       <section className="mt-3 space-y-1 rounded-2xl border border-border bg-surface p-2 sm:p-3" aria-label="Transcript">
         {visible.length === 0 ? (
-          <EmptyState className="border-0" title={segments.length ? 'No segments match' : 'No transcript yet'} body={segments.length ? 'Change the search or filter.' : 'Add lines below while listening to the audio, or continue recording.'} />
+          <EmptyState className="border-0" title={segments.length ? 'No segments match' : 'No transcript yet'} body={segments.length ? 'Change the search or filter.' : runs.length ? 'Use “Transcribe recording” above, add lines below while listening, or continue recording.' : 'Add lines below, or continue recording.'} />
         ) : (
           visible.map((s) =>
             editingId === s.id ? (

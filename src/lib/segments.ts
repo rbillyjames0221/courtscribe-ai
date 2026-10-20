@@ -21,6 +21,10 @@ export type ProviderResult = {
   endMs: number
   confidence?: number
   language?: string
+  /** Always flag as needs_review (e.g. on-device Whisper output, flushed interims). */
+  forceReview?: boolean
+  /** Recognizer that produced it ('webspeech' | 'whisper' | 'mock' | 'server'). */
+  engine?: string
 }
 
 export type MergeContext = {
@@ -59,7 +63,8 @@ export function isSettled(s: Segment): boolean {
   return s.status !== 'interim'
 }
 
-function finalStatus(confidence: number | undefined, threshold: number): SegmentStatus {
+function finalStatus(confidence: number | undefined, threshold: number, force?: boolean): SegmentStatus {
+  if (force) return 'needs_review'
   if (confidence !== undefined && confidence > 0 && confidence < threshold) return 'needs_review'
   return 'final'
 }
@@ -84,7 +89,7 @@ export function mergeProviderResult(segments: Segment[], r: ProviderResult, ctx:
       )
       if (dup) return { segments, segment: dup, action: 'duplicate' }
     }
-    const status: SegmentStatus = r.isFinal ? finalStatus(r.confidence, threshold) : 'interim'
+    const status: SegmentStatus = r.isFinal ? finalStatus(r.confidence, threshold, r.forceReview) : 'interim'
     const seg: Segment = {
       id,
       sessionId: ctx.sessionId,
@@ -100,6 +105,7 @@ export function mergeProviderResult(segments: Segment[], r: ProviderResult, ctx:
       reviewed: false,
       confidence: r.confidence,
       source: 'stt',
+      engine: r.engine,
       language: r.language,
       revisions: r.isFinal ? [{ at: ctx.now, by: 'provider', text, speakerId: ctx.speakerId, status }] : [],
     }
@@ -125,7 +131,7 @@ export function mergeProviderResult(segments: Segment[], r: ProviderResult, ctx:
   }
 
   // Final result.
-  const status = finalStatus(r.confidence, threshold)
+  const status = finalStatus(r.confidence, threshold, r.forceReview)
   if (isSettled(existing) && existing.text === text) return { segments, segment: existing, action: 'ignored' }
   if (!text) {
     // Provider finalized with nothing: keep the last interim text but flag it for review.

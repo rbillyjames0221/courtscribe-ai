@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
-import { CheckCircle2, HardDrive, Mic, MicOff, Plus, ShieldCheck, Trash2, Wifi, WifiOff, XCircle, AlertTriangle } from 'lucide-react'
+import { CheckCircle2, HardDrive, Mic, MicOff, Plus, ShieldCheck, Trash2, Wifi, WifiOff, XCircle, AlertTriangle, Info, Cpu } from 'lucide-react'
+import { WHISPER_MODELS } from '@/lib/whisper/models'
+import { isModelCached } from '@/lib/whisper/client'
 import { LANGUAGES, MODES, SPEAKER_ROLES, Session as SessionSchema, type Language, type Mode, type Participant, type Session, type SpeakerRole } from '@/lib/types'
 import { uid } from '@/lib/id'
 import { repo, storageEstimate } from '@/lib/db'
 import { LevelMeter, micPermissionState, openMic } from '@/lib/audio/capture'
 import { PROVIDERS, providerAvailability, type ProviderId } from '@/lib/speech'
+import { speechEnv } from '@/lib/speech/env'
+import { SpeechTest } from '@/components/SpeechTest'
 import { fmtBytes } from '@/lib/time'
 import { useSettings } from '@/store/settings'
 import { useLive } from '@/store/live'
@@ -244,7 +248,14 @@ export default function NewSession() {
               </Select>
             </Field>
           )}
-          {needsProvider && !avail.ok && <p className="text-sm text-warning">{avail.reason} You can use Manual/Steno mode or the demo script.</p>}
+          {needsProvider && !avail.ok && <p className="text-sm text-warning">{avail.reason} You can use On-device Whisper, Manual/Steno mode or the demo script.</p>}
+          {needsProvider && providerId === 'webspeech' && avail.ok && speechEnv().android && settings.audioStrategy !== 'both' && (
+            <Banner tone="info" icon={<Info className="text-interactive" />}>
+              <b>Android:</b> Chrome can't record audio and do live speech-to-text at the same time, so live text gets the microphone and <b>audio is not saved</b> (transcript, notes and bookmarks are). To keep audio too, choose <b>On-device Whisper</b> — text then appears in blocks a few seconds behind.
+            </Banner>
+          )}
+          {needsProvider && providerId === 'whisper' && <WhisperNote model={settings.whisperModel} />}
+          {needsProvider && providerId === 'webspeech' && avail.ok && <SpeechTest language={language} beforeStart={stopTest} />}
           <details className="group rounded-xl border border-border px-3.5 py-1">
             <summary className="flex min-h-11 cursor-pointer items-center text-sm font-medium">Advanced: glossary, recording source and storage</summary>
             <div className="space-y-4 pt-2 pb-3">
@@ -347,5 +358,19 @@ export default function NewSession() {
         </Button>
       </div>
     </div>
+  )
+}
+
+function WhisperNote({ model }: { model: keyof typeof WHISPER_MODELS }) {
+  const [cached, setCached] = useState<boolean>()
+  useEffect(() => {
+    void isModelCached(model).then(setCached)
+  }, [model])
+  const m = WHISPER_MODELS[model]
+  return (
+    <Banner tone="info" icon={<Cpu className="text-interactive" />}>
+      <b>{m.label}</b> runs entirely on this device — free, private, works offline. Audio is recorded and transcribed in ~10 s blocks a few seconds behind; all output is marked <b>Needs review</b>.{' '}
+      {cached ? 'Model is downloaded and ready offline.' : `First use downloads about ${m.sizeMb} MB (Wi-Fi recommended); it is then cached.`} Change model in Settings.
+    </Banner>
   )
 }

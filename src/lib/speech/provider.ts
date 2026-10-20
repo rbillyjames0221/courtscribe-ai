@@ -10,13 +10,23 @@ import type { ProviderResult } from '../segments'
 
 export type ProviderStatus = 'idle' | 'connecting' | 'listening' | 'paused' | 'reconnecting' | 'offline' | 'error' | 'unsupported' | 'stopped'
 
-export type ProviderError = { code: string; message: string; recoverable: boolean }
+export type ProviderError = { code: string; message: string; recoverable: boolean; action?: string }
+
+export type ProviderInfo =
+  | { type: 'language'; lang: string; fallbackFrom?: string }
+  | { type: 'activity'; state: 'sound' | 'speech' | 'silence' }
+  | { type: 'no-speech'; count: number }
+  | { type: 'mic-contention'; reason: string }
+  | { type: 'model'; state: 'loading' | 'ready' | 'error'; loaded?: number; total?: number; message?: string }
+  | { type: 'lag'; queued: number }
 
 export type StartOptions = {
   language: Language
   glossary: string[]
   /** Session clock (active recording ms) so results carry session-relative timestamps. */
   clock: () => number
+  /** Live microphone stream, for providers that process PCM on-device (Whisper). */
+  stream?: MediaStream | null
 }
 
 export type ProviderResultWithHint = ProviderResult & { speakerRoleHint?: string }
@@ -32,6 +42,8 @@ export interface SpeechProvider {
   receiveInterimResult(cb: (r: ProviderResultWithHint) => void): () => void
   receiveFinalResult(cb: (r: ProviderResultWithHint) => void): () => void
   onStatus(cb: (s: ProviderStatus, err?: ProviderError) => void): () => void
+  /** Informational events (language fallback, speech activity, diagnostics). */
+  onInfo(cb: (i: ProviderInfo) => void): () => void
   pause(): void
   resume(): void
   finishSession(): Promise<void>
@@ -48,6 +60,7 @@ export abstract class BaseProvider implements SpeechProvider {
   private interimL = new Set<Listener<[ProviderResultWithHint]>>()
   private finalL = new Set<Listener<[ProviderResultWithHint]>>()
   private statusL = new Set<Listener<[ProviderStatus, ProviderError | undefined]>>()
+  private infoL = new Set<Listener<[ProviderInfo]>>()
   status: ProviderStatus = 'idle'
 
   abstract isSupported(): boolean
@@ -69,6 +82,13 @@ export abstract class BaseProvider implements SpeechProvider {
   onStatus(cb: (s: ProviderStatus, err?: ProviderError) => void) {
     this.statusL.add(cb)
     return () => void this.statusL.delete(cb)
+  }
+  onInfo(cb: (i: ProviderInfo) => void) {
+    this.infoL.add(cb)
+    return () => void this.infoL.delete(cb)
+  }
+  protected info(i: ProviderInfo) {
+    for (const l of this.infoL) l(i)
   }
   protected emit(r: ProviderResultWithHint) {
     for (const l of r.isFinal ? this.finalL : this.interimL) l(r)

@@ -156,7 +156,7 @@ export default function Sessions() {
         />
       </header>
       {importError && <ErrorState title="Import failed" body={importError} />}
-      <p className="text-sm text-muted">Imported audio is stored locally for manual/steno transcription and review. Automatic transcription of files needs the cloud backend (not configured).</p>
+      <p className="text-sm text-muted">Imported audio stays on this device. Open it and tap “Transcribe recording” to transcribe it with on-device Whisper (free, no upload), or transcribe manually.</p>
       <div className="flex flex-col gap-2 sm:flex-row">
         <div className="relative flex-1">
           <Search className="pointer-events-none absolute top-1/2 left-3.5 size-4.5 -translate-y-1/2 text-muted" />

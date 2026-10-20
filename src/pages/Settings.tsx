@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Accessibility, Archive, ChevronRight, Info, Keyboard, Languages, Lock, Mic, SlidersHorizontal, Type } from 'lucide-react'
-import { useSettings, type ExportTemplate } from '@/store/settings'
+import { Accessibility, Archive, Cpu, ChevronRight, Info, Keyboard, Languages, Lock, Mic, SlidersHorizontal, Type } from 'lucide-react'
+import { useSettings, type AudioStrategy, type ExportTemplate } from '@/store/settings'
+import { WhisperSettings } from '@/components/WhisperSettings'
 import { useSessions } from '@/store/sessions'
 import { useLive } from '@/store/live'
 import { repo, storageEstimate } from '@/lib/db'
@@ -82,6 +83,15 @@ export default function Settings() {
       <Group icon={<Mic />} title="Audio and microphone">
         <Switch checked={s.keepScreenAwake} onChange={(v) => s.set({ keepScreenAwake: v })} label="Keep screen awake while recording" description="Uses the Screen Wake Lock API where supported" />
         <Switch checked={s.noiseSuppression} onChange={(v) => s.set({ noiseSuppression: v })} label="Noise suppression" />
+        <div className="py-3">
+          <Field label="Microphone sharing (browser live text)" htmlFor="strat" hint="Android Chrome cannot record audio and run live speech recognition at the same time. Auto gives live text the mic on Android (audio not saved) and records both elsewhere, switching automatically if the recognizer can't hear. For audio + text on Android, use On-device Whisper.">
+            <Select id="strat" value={s.audioStrategy} onChange={(e) => s.set({ audioStrategy: e.target.value as AudioStrategy })}>
+              <option value="auto">Auto (recommended)</option>
+              <option value="transcription">Always prioritize live text (no audio saved)</option>
+              <option value="both">Always record audio too (live text may fail on Android)</option>
+            </Select>
+          </Field>
+        </div>
         <Advanced>
           <Switch checked={s.echoCancellation} onChange={(v) => s.set({ echoCancellation: v })} label="Echo cancellation" />
           <Switch checked={s.autoGainControl} onChange={(v) => s.set({ autoGainControl: v })} label="Automatic gain control" />
@@ -118,6 +128,10 @@ export default function Settings() {
           </Field>
           <p className="text-sm text-muted">Filipino and mixed English–Tagalog accuracy have not been benchmarked. Cloud providers (Google / Azure) run through a server-side seam that is not configured in this deployment.</p>
         </Advanced>
+      </Group>
+
+      <Group icon={<Cpu />} title="On-device transcription (Whisper)">
+        <WhisperSettings />
       </Group>
 
       <Group icon={<Keyboard />} title="Stenography dictionaries">

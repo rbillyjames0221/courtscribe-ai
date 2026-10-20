@@ -16,12 +16,13 @@ import { Dialog } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { Banner, LoadingState } from '@/components/ui/states'
 import { SegmentRow, speakerName } from '@/components/Transcript'
+import { ListeningIndicator, RecognitionBanners } from '@/components/RecognitionStatus'
 
 function ConnectionPill() {
   const { providerStatus, session, online } = useLive()
   if (session?.mode === 'steno') return <span className="text-muted">Manual mode</span>
   const map: Record<string, { label: string; cls: string; icon?: React.ReactNode }> = {
-    listening: { label: 'Connected', cls: 'text-success', icon: <Wifi className="size-3.5" /> },
+    listening: { label: session?.providerId === 'whisper' ? 'On-device' : 'Listening', cls: 'text-success', icon: <Wifi className="size-3.5" /> },
     connecting: { label: 'Connecting…', cls: 'text-muted', icon: <Loader2 className="size-3.5 animate-spin" /> },
     reconnecting: { label: 'Reconnecting…', cls: 'text-warning', icon: <RefreshCw className="size-3.5 animate-spin" /> },
     offline: { label: 'Offline — audio still saving', cls: 'text-warning', icon: <CloudOff className="size-3.5" /> },
@@ -241,11 +242,7 @@ function LiveScreen() {
             {live.notice}
           </Banner>
         )}
-        {live.providerError && (live.providerStatus === 'error' || live.providerStatus === 'unsupported' || live.providerStatus === 'reconnecting' || live.providerStatus === 'offline') && (
-          <Banner tone={live.providerStatus === 'error' || live.providerStatus === 'unsupported' ? 'danger' : 'warning'} icon={<AlertTriangle className="text-warning" />} action={live.providerStatus !== 'unsupported' && <Button size="sm" onClick={() => void live.retryRecognition()}><RefreshCw /> Retry</Button>}>
-            {live.providerError.message}
-          </Banner>
-        )}
+        <RecognitionBanners />
       </div>
 
       {/* Transcript */}
@@ -254,7 +251,8 @@ function LiveScreen() {
           {visible.length === 0 ? (
             <div className="flex flex-col items-center px-6 py-16 text-center text-muted">
               <Mic className="mb-3 size-8" />
-              <p className="font-medium text-text">{live.phase === 'paused' ? 'Paused' : session.mode === 'steno' ? 'Recording audio — type below' : 'Listening… start speaking'}</p>
+              {session.mode === 'steno' ? <p className="font-medium text-text">{live.phase === 'paused' ? 'Paused' : 'Recording audio — type below'}</p> : <ListeningIndicator className="text-base" />}
+              {session.mode !== 'steno' && live.providerStatus === 'listening' && session.providerId === 'webspeech' && <p className="mt-1 text-sm">Start speaking — words appear here as you talk (grey while provisional).</p>}
               <p className="mt-1 max-w-sm text-sm">Current speaker: {current}. Tap the speaker button to change who is talking. Audio is saved every {settings.chunkSeconds}s.</p>
             </div>
           ) : (
@@ -433,8 +431,17 @@ function LiveScreen() {
               <ArrowDown /> Jump to live
             </Button>
           </div>
+          {session.mode !== 'steno' && session.providerId === 'webspeech' && (
+            <div className="rounded-xl border border-border p-3 text-sm">
+              <p className="font-medium">Microphone use</p>
+              <p className="mt-0.5 text-muted">{live.audioMode === 'transcription-priority' ? 'Transcription priority: live text has the mic; audio is not saved.' : live.audioMode === 'recording' ? 'Recording audio and running live text together.' : 'Audio saving is off for this session.'}</p>
+              <Button size="sm" className="mt-2" onClick={() => void live.setAudioPriority(live.audioMode === 'transcription-priority' ? 'both' : 'transcription').then(() => setSheet(null))} disabled={live.audioMode === 'none'}>
+                {live.audioMode === 'transcription-priority' ? <><Mic /> Record audio too</> : <><RefreshCw /> Prioritize live text</>}
+              </Button>
+            </div>
+          )}
           <div className="rounded-xl bg-surface-2 p-3 text-sm text-muted">
-            {live.chunkCount} audio chunks saved · {live.segments.filter((s) => s.status !== 'interim').length} segments · {live.bookmarks.length} bookmarks/notes
+            {live.audioMode === 'transcription-priority' ? 'Audio not saved (transcription priority)' : `${live.chunkCount} audio chunks saved`} · {live.segments.filter((s) => s.status !== 'interim').length} segments · {live.bookmarks.length} bookmarks/notes
           </div>
           {live.bookmarks.length > 0 && (
             <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">

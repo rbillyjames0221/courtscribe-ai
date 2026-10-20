@@ -3,6 +3,15 @@ import { persist } from 'zustand/middleware'
 import { DEFAULT_STENO } from '@/lib/steno'
 import type { Language, Mode, StenoEntry } from '@/lib/types'
 import type { ProviderId } from '@/lib/speech'
+import type { WhisperModelId } from '@/lib/whisper/models'
+import type { WhisperDevice } from '@/lib/whisper/client'
+
+/**
+ * How the microphone is shared between local audio recording and browser live recognition.
+ * auto: Android → transcription priority (Android Chrome cannot do both); elsewhere both, with
+ * automatic fallback to transcription priority if the recognizer reports the mic is busy.
+ */
+export type AudioStrategy = 'auto' | 'both' | 'transcription'
 
 export type ExportTemplate = 'verbatim' | 'clean' | 'court-qa' | 'interview' | 'meeting'
 
@@ -18,6 +27,13 @@ export type Settings = {
   noiseSuppression: boolean
   autoGainControl: boolean
   keepScreenAwake: boolean
+  audioStrategy: AudioStrategy
+  // on-device Whisper
+  whisperModel: WhisperModelId
+  whisperDevice: WhisperDevice
+  whisperWindowSec: number
+  /** While recording audio with browser live recognition, fill gaps with Whisper (only if the model is already downloaded). */
+  whisperLiveFallback: boolean
   // recognition
   showInterim: boolean
   showConfidence: boolean
@@ -53,6 +69,11 @@ const defaults: Omit<Settings, 'set' | 'reset'> = {
   noiseSuppression: true,
   autoGainControl: true,
   keepScreenAwake: true,
+  audioStrategy: 'auto',
+  whisperModel: 'tiny',
+  whisperDevice: 'auto',
+  whisperWindowSec: 10,
+  whisperLiveFallback: true,
   showInterim: true,
   showConfidence: false,
   reviewThreshold: 0.55,

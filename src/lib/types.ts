@@ -68,6 +68,8 @@ export const Session = z.object({
   durationMs: z.number().default(0),
   /** Number of capture runs (a crash/resume starts a new run). */
   runCount: z.number().default(0),
+  /** Some or all of the session ran in transcription-priority mode (live recognition had the mic; no audio saved). */
+  transcriptionPriority: z.boolean().optional(),
   lastCheckpoint: z
     .object({ at: z.number(), chunkSeq: z.number(), segmentCount: z.number(), durationMs: z.number() })
     .optional(),
@@ -106,6 +108,7 @@ export const Segment = z.object({
   reviewed: z.boolean(),
   confidence: z.number().min(0).max(1).optional(),
   source: z.enum(['stt', 'manual', 'steno']),
+  engine: z.string().optional(),
   language: z.string().optional(),
   revisions: z.array(Revision),
   /** Later provider text that was held back because the user had already corrected this segment. */

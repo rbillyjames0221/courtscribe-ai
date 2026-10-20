@@ -39,6 +39,35 @@ interviews, meetings and lectures — **web / PWA build deployed on Vercel**.
   Formatting, Storage & Backups, Privacy & Security, Accessibility, About. Advanced sections collapsed.
 - **PWA**: installable, offline app shell (Workbox), update prompt that never interrupts a recording.
 
+## Speech recognition engines (all free)
+
+| Engine | Where | Live? | Audio saved? | Notes |
+|---|---|---|---|---|
+| Browser live (Web Speech API) | Chrome / Edge / Android Chrome | Word-by-word | Desktop: yes · **Android: no** (see below) | Needs internet; Chrome sends audio to Google. `en-PH → en-US`, `fil-PH → tl-PH → en-US` fallback. |
+| On-device Whisper (transformers.js, `onnx-community/whisper-tiny` / `-base`, q8) | Any modern browser with WASM (WebGPU optional) | ~10 s blocks, a few seconds behind | Yes | Free, private, offline after a one-time download (~55 MB tiny / ~92 MB base). Output always **Needs review**. |
+
+**Android Chrome mic contention (root cause of "no transcript on my phone").** Android gives the
+microphone to one user at a time. When MediaRecorder/getUserMedia holds it, `SpeechRecognition`
+starts but hears nothing (it ends with `no-speech`/`audio-capture`, or silently). The app now:
+
+- `audioStrategy = auto` (Settings → Audio): on Android, browser live text runs in **transcription
+  priority** — no getUserMedia stream is opened, so the recognizer gets the mic; the transcript, notes
+  and bookmarks are saved but **no audio**. A banner says so. On desktop both run; if the recognizer
+  reports `audio-capture` or keeps hearing silence while the level meter shows sound, the app switches
+  to transcription priority automatically and says why.
+- For audio **and** text on Android, choose **On-device Whisper**: it taps PCM from the same stream
+  MediaRecorder uses (no second mic open) and transcribes in a Web Worker.
+- Recognizer reliability: restart on every `end` (Android uses non-continuous mode, one utterance per
+  run), backoff only on real errors, watchdog for hung/never-started recognizers, restart when the tab
+  becomes visible, unfinished interim text kept as Needs review, every error shown with a fix.
+- New Session → **Test speech recognition** shows words live before you start.
+- Review → **Transcribe recording** runs Whisper over saved audio (also for imported files), fills
+  gaps only by default, never overwrites edited lines, re-runs are idempotent.
+
+Tests: `npm test` (unit, incl. fake-SpeechRecognition provider tests) and
+`node scripts/e2e-speech.mjs` (headless Chrome: Android/desktop scenarios with a scripted recognizer,
+real Whisper on a fake-mic clip — needs `/workspace/courtscribe/jfk48.wav`).
+
 ## Limitations (honest)
 
 - Web Speech API works in Chrome / Edge / Android Chrome (Safari partially). Firefox has none →

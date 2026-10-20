@@ -52,7 +52,7 @@ export function StatusBadge({ s }: { s: Segment }) {
   if (s.status === 'interim') return <Badge tone="info">Listening…</Badge>
   if (s.status === 'needs_review') return (
     <Badge tone="warning">
-      <AlertTriangle /> Needs review
+      <AlertTriangle /> Needs review{s.engine === 'whisper' ? ' · Whisper' : ''}
     </Badge>
   )
   if (s.status === 'inaudible') return <Badge>Inaudible</Badge>

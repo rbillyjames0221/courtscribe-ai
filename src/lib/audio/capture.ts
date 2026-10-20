@@ -78,7 +78,7 @@ export class AudioCapture {
   private lastChunkEnd = 0
   readonly mimeType: string
   constructor(
-    private stream: MediaStream,
+    private stream: MediaStream | null,
     private offsetMs: number,
     private onChunk: ChunkHandler,
     private timesliceMs = 5000,
@@ -93,7 +93,7 @@ export class AudioCapture {
   }
   start() {
     this.activeSince = performance.now()
-    if (!this.recordAudio || typeof MediaRecorder === 'undefined') return
+    if (!this.recordAudio || !this.stream || typeof MediaRecorder === 'undefined') return
     const rec = new MediaRecorder(this.stream, this.mimeType ? { mimeType: this.mimeType, audioBitsPerSecond: 32000 } : undefined)
     rec.ondataavailable = (e) => {
       if (!e.data || e.data.size === 0) return

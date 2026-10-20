@@ -39,11 +39,20 @@ export default defineConfig({
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api\//],
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+        // On-device Whisper runtime (~27 MB) is fetched on first use, then served from cache offline.
+        runtimeCaching: [
+          {
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.endsWith('.wasm'),
+            handler: 'CacheFirst',
+            options: { cacheName: 'cs-wasm', expiration: { maxEntries: 4 }, cacheableResponse: { statuses: [200] } },
+          },
+        ],
       },
     }),
   ],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   build: { chunkSizeWarningLimit: 1500 },
+  worker: { format: 'es' },
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
