@@ -74,10 +74,11 @@ real Whisper on a fake-mic clip — needs `/workspace/courtscribe/jfk48.wav`).
   use Manual/Steno or demo. Chrome sends audio to Google's speech service; it needs a connection.
 - Filipino and Taglish accuracy is **unverified**; "Experimental Mixed" uses the `fil-PH` recognizer.
 - Web Speech gives no word timings; segment timestamps are approximated from arrival time.
-- On some Android devices, Web Speech and MediaRecorder compete for the microphone.
+- Android Chrome cannot run Web Speech and MediaRecorder together: browser live text there saves no audio (use On-device Whisper for both).
+- Whisper tiny/base accuracy on Philippine courtroom speech and Tagalog is unverified; on phones it can lag behind real time (blocks are skipped and can be filled later via Transcribe recording). Very long recordings (>~1 h) may exhaust phone memory when transcribed afterwards.
 - Browser storage is not separately encrypted; the Android build will use encrypted SQLite.
 - Automatic diarization is not implemented (manual speaker assignment by design).
-- Imported audio files are not auto-transcribed (needs the cloud backend).
+- Imported audio is transcribed on-device with Whisper on request (no cloud).
 
 ## Develop
 
