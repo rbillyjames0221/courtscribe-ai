@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string }
 
 export default defineConfig({
-  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+  define: { __APP_VERSION__: JSON.stringify(pkg.version), 'import.meta.env.VITE_BUILD': JSON.stringify(process.env.VITE_BUILD ?? `${pkg.version} ${new Date().toISOString().slice(0, 16)}Z`) },
   plugins: [
     react(),
     tailwindcss(),
