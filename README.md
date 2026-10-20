@@ -1,0 +1,94 @@
+# CourtScribe AI
+
+Mobile-first live transcription and digital stenography for Philippine court hearings,
+interviews, meetings and lectures — **web / PWA build deployed on Vercel**.
+
+> **Assisted, uncertified transcription.** Output is a working draft, not a certified transcript,
+> official judicial record or guaranteed evidence. Recording requires authorization from the
+> presiding court or competent authority; recordings are confidential personal data (RA 10173).
+
+## What works in this build
+
+- **New session**: title, case no., venue, date, participants with roles (Judge, Court Stenographer,
+  Prosecutor, Defense/Plaintiff's/Defendant's Counsel, Witness, Interpreter, Court Clerk, Other),
+  language (English `en-PH` / Filipino `fil-PH` / Experimental Mixed), mode (Live STT / Manual-Steno /
+  Hybrid), provider, glossary, storage mode. Mandatory authorization confirmation, mic permission
+  check with live level meter, network and storage checks.
+- **Live transcription**: MediaRecorder audio saved to IndexedDB as timestamped, sequence-numbered
+  chunks (default 5 s, never overwritten). Recognition goes through a provider interface
+  (`startSession / sendAudio / receiveInterimResult / receiveFinalResult / finishSession / reconnect /
+  handleError`) with the browser **Web Speech API** (default) and a **demo** provider. Interim / final /
+  corrected / needs-review / inaudible styling, Smart Follow + Jump to Live, fixed toolbar
+  (speaker, bookmark types, pause/resume, note, stop with confirmation, more tools), header with
+  elapsed time + save + connection state, wake lock, offline handling, mic-loss handling, language
+  change mid-session without stopping audio. The engine lives outside React, so recording continues
+  while scrolling, editing or navigating to other tabs.
+- **Crash recovery**: checkpoints every 5 s; Home shows a recovery banner for interrupted sessions
+  (last confirmed audio time, chunk and segment counts) with Resume / Review / Mark finished. Resume
+  continues the same timeline in a new audio run.
+- **Review**: playback across runs, waveform (when decodable), bookmarks on the timeline,
+  tap-to-seek, play passage, inline edit, speaker reassignment, mark reviewed, insert `(inaudible)` /
+  `(unclear)`, search, filters, find & replace, undo/redo, per-segment revision history with restore.
+  User corrections are never overwritten by recognition output (held suggestions are shown instead).
+- **Steno workspace**: editable / searchable / importable (JSON, CSV) / exportable dictionary,
+  word-boundary-safe live expansion (`\abbr` keeps it literal), practice pad.
+- **Exports**: TXT, DOCX (line-numbered), searchable PDF (DRAFT watermark, page/line numbers), SRT,
+  JSON (with revisions), original audio. Templates: Verbatim, Court-Style Q&A, Clean Reading (derived),
+  Interview, Meeting Notes. Every export is labelled DRAFT / assisted / not certified.
+- **Settings**: General, Audio & Microphone, Language & Recognition, Stenography, Transcript
+  Formatting, Storage & Backups, Privacy & Security, Accessibility, About. Advanced sections collapsed.
+- **PWA**: installable, offline app shell (Workbox), update prompt that never interrupts a recording.
+
+## Limitations (honest)
+
+- Web Speech API works in Chrome / Edge / Android Chrome (Safari partially). Firefox has none →
+  use Manual/Steno or demo. Chrome sends audio to Google's speech service; it needs a connection.
+- Filipino and Taglish accuracy is **unverified**; "Experimental Mixed" uses the `fil-PH` recognizer.
+- Web Speech gives no word timings; segment timestamps are approximated from arrival time.
+- On some Android devices, Web Speech and MediaRecorder compete for the microphone.
+- Browser storage is not separately encrypted; the Android build will use encrypted SQLite.
+- Automatic diarization is not implemented (manual speaker assignment by design).
+- Imported audio files are not auto-transcribed (needs the cloud backend).
+
+## Develop
+
+```bash
+npm install
+npm run dev        # http://localhost:5173
+npm test           # Vitest: segment merge + steno expansion
+npm run build      # type-check + production build + service worker
+node scripts/e2e.mjs   # headless Chrome smoke test + screenshots (needs `npm run preview`)
+```
+
+Structure: `src/lib/segments.ts` (merge logic), `src/lib/steno.ts`, `src/lib/speech/*` (providers),
+`src/lib/audio/*` (capture/playback), `src/lib/db.ts` (IndexedDB), `src/store/live.ts` (recording
+engine), `src/lib/export/*`, `src/pages/*`, `api/speech/*` (Vercel functions).
+
+## Server-side provider seam (Google / Azure)
+
+Credentials are **never** shipped in the frontend or APK.
+- `api/speech/status.ts` — reports configured providers (no secrets).
+- `api/speech/token.ts` — mints short-lived tokens (Azure STS token, or an HMAC ticket for the relay).
+  Returns `501 not_configured` today.
+- `src/lib/speech/server.ts` — client provider that streams the saved chunks to a WebSocket relay.
+- `server/README.md` — Cloud Run relay design, wire protocol, env vars.
+
+## Android (Capacitor) — not built yet
+
+`capacitor.config.ts` is ready (`appId ph.courtscribe.app`, `webDir dist`). To produce an APK later:
+
+```bash
+npm i @capacitor/android && npx cap add android
+npm run build && npx cap sync android
+npx cap open android   # build/sign in Android Studio (Gradle)
+```
+
+Required before shipping: native Kotlin audio capture module with a **foreground service** +
+persistent notification (WebView recording is not reliable in the background), `RECORD_AUDIO` /
+`FOREGROUND_SERVICE_MICROPHONE` / `POST_NOTIFICATIONS` runtime permissions, audio-focus and
+phone-call interruption handling, encrypted SQLite + app-private audio files, and the cloud
+streaming provider (Web Speech is not available inside Android WebView).
+
+## Deploy
+
+Vercel project `courtscribe-ai` (framework: Vite, output `dist`, SPA rewrites in `vercel.json`).
