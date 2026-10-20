@@ -44,12 +44,15 @@ type LiveState = {
   /** The recognizer reports silence while the mic meter shows sound (mic contention) and auto-switching is off. */
   contention?: string
   speechActivity: 'idle' | 'sound' | 'speech' | 'silence'
+  recState?: { started: boolean; audio: boolean; sound: boolean; speech: boolean; runs: number; results: number }
+  recLog: import('@/lib/speech/provider').LogEntry[]
   noSpeechCount: number
   recognizerLang?: string
   lastResultAt?: number
   resultCount: number
   model?: { state: 'loading' | 'ready' | 'error'; loaded?: number; total?: number; message?: string }
   fallbackActive: boolean
+  whisperDiag?: import('@/lib/speech/whisper').WhisperDiag
   setAudioPriority: (mode: 'transcription' | 'both', reason?: string) => Promise<void>
   start: (session: Session, opts?: { resume?: boolean }) => Promise<boolean>
   pause: () => Promise<void>
@@ -75,6 +78,7 @@ let fallback: SpeechProvider | null = null
 let fallbackUnsubs: (() => void)[] = []
 let captureRun = 0
 let releasingMic = false
+let prestarted: { p: SpeechProvider; language: Language; at: number } | null = null
 let peakLevel = 0
 let peakAt = 0
 let tickTimer: ReturnType<typeof setInterval> | null = null
@@ -161,7 +165,12 @@ export const useLive = create<LiveState>((set, get) => {
   }
 
   const onInfo = (i: ProviderInfo) => {
-    if (i.type === 'activity') set({ speechActivity: i.state })
+    if (i.type === 'log') set({ recLog: [...get().recLog.slice(-299), i.entry] })
+    else if (i.type === 'rec-state') set({ recState: { started: i.started, audio: i.audio, sound: i.sound, speech: i.speech, runs: i.runs, results: i.results } })
+    else if (i.type === 'whisper-diag') {
+      set({ whisperDiag: i.diag })
+      ;(window as unknown as { __csWhisperDiag?: unknown }).__csWhisperDiag = i.diag
+    } else if (i.type === 'activity') set({ speechActivity: i.state })
     else if (i.type === 'language') set({ recognizerLang: i.lang, notice: i.fallbackFrom ? `Recognition language ${i.fallbackFrom} is not available in this browser — using ${i.lang} instead.` : get().notice })
     else if (i.type === 'model') set({ model: { state: i.state, loaded: i.loaded, total: i.total, message: i.message } })
     else if (i.type === 'lag') set({ notice: 'This device is transcribing slower than real time; some blocks were skipped. Use "Transcribe recording" in Review afterwards to fill them in.' })
@@ -181,15 +190,25 @@ export const useLive = create<LiveState>((set, get) => {
   const attachProvider = async (id: ProviderId, language: Language) => {
     const s = get().session!
     const st = useSettings.getState()
-    provider = createProvider(id, { whisperModel: st.whisperModel, whisperDevice: st.whisperDevice, whisperWindowSec: st.whisperWindowSec })
+    // A recognizer started synchronously inside the user's Start tap (mobile Chrome may refuse
+    // audio to SpeechRecognition.start() called later, after awaits) is adopted here.
+    const pre = id === 'webspeech' && prestarted && prestarted.language === language && Date.now() - prestarted.at < 30_000 ? prestarted.p : null
+    if (prestarted && !pre) void prestarted.p.finishSession()
+    prestarted = null
+    provider = pre ?? createProvider(id, { whisperModel: st.whisperModel, whisperDevice: st.whisperDevice, whisperWindowSec: st.whisperWindowSec })
+    const prevLog = pre && 'events' in pre ? (pre as unknown as { events: import('@/lib/speech/provider').LogEntry[] }).events : []
+    set({ recLog: [...prevLog], recState: undefined })
     unsubs.push(provider.receiveInterimResult(onResult), provider.receiveFinalResult(onResult), provider.onInfo(onInfo))
     unsubs.push(
       provider.onStatus((st, err) => {
         set({ providerStatus: st, providerError: err && err.code !== 'no-speech' ? err : st === 'listening' ? undefined : get().providerError })
       }),
     )
-    set({ recognizerLang: undefined, speechActivity: 'idle', noSpeechCount: 0 })
-    await provider.startSession({ language, glossary: s.glossary, clock: () => capture?.clock() ?? 0, stream })
+    set({ recognizerLang: undefined, speechActivity: 'idle', noSpeechCount: 0, whisperDiag: undefined })
+    if (pre) {
+      set({ providerStatus: pre.status, recognizerLang: (pre as unknown as { language?: string }).language })
+      pre.flushBacklog()
+    } else await provider.startSession({ language, glossary: s.glossary, clock: () => capture?.clock() ?? 0, stream })
     // Gap-filler: on-device Whisper alongside browser live recognition, only when audio is being
     // recorded and the model is already downloaded (never a surprise download).
     if (id === 'webspeech' && stream && st.whisperLiveFallback && (await isModelCached(st.whisperModel).catch(() => false))) await attachFallback(language)
@@ -330,6 +349,7 @@ export const useLive = create<LiveState>((set, get) => {
     noSpeechCount: 0,
     resultCount: 0,
     fallbackActive: false,
+    recLog: [],
 
     setAudioPriority: async (mode, reason) => {
       const s = get().session
@@ -546,6 +566,18 @@ export const useLive = create<LiveState>((set, get) => {
     dismissNotice: () => set({ notice: undefined }),
   }
 })
+
+/**
+ * Start browser speech recognition synchronously inside a tap/click handler (call before any await).
+ * The live engine adopts it when recording starts, so the first start() happens with user activation.
+ */
+export function prestartRecognition(language: Language) {
+  if (prestarted) void prestarted.p.finishSession()
+  const p = createProvider('webspeech')
+  if (!p.isSupported()) return
+  void p.startSession({ language, glossary: [], clock: () => capture?.clock() ?? 0 })
+  prestarted = { p, language, at: Date.now() }
+}
 
 export function isUnfinished(s: Session, activeId: string | undefined): boolean {
   if (s.id === activeId) return false

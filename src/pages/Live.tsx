@@ -16,14 +16,16 @@ import { Dialog } from '@/components/ui/dialog'
 import { Field, Input, Select, Textarea } from '@/components/ui/field'
 import { Banner, LoadingState } from '@/components/ui/states'
 import { SegmentRow, speakerName } from '@/components/Transcript'
-import { ListeningIndicator, RecognitionBanners } from '@/components/RecognitionStatus'
+import { ListeningIndicator, RecognitionBanners, WhisperDiagLine } from '@/components/RecognitionStatus'
+import { primeAudio, getAudioContext } from '@/lib/audio/pcm'
+import { SpeechDiagnostics } from '@/components/SpeechDiagnostics'
 
 function ConnectionPill() {
   const { providerStatus, session, online } = useLive()
   if (session?.mode === 'steno') return <span className="text-muted">Manual mode</span>
   const map: Record<string, { label: string; cls: string; icon?: React.ReactNode }> = {
     listening: { label: session?.providerId === 'whisper' ? 'On-device' : 'Listening', cls: 'text-success', icon: <Wifi className="size-3.5" /> },
-    connecting: { label: 'Connecting…', cls: 'text-muted', icon: <Loader2 className="size-3.5 animate-spin" /> },
+    connecting: { label: session?.providerId === 'webspeech' ? 'Starting mic…' : 'Connecting…', cls: 'text-muted', icon: <Loader2 className="size-3.5 animate-spin" /> },
     reconnecting: { label: 'Reconnecting…', cls: 'text-warning', icon: <RefreshCw className="size-3.5 animate-spin" /> },
     offline: { label: 'Offline — audio still saving', cls: 'text-warning', icon: <CloudOff className="size-3.5" /> },
     paused: { label: 'Recognition paused', cls: 'text-muted' },
@@ -243,6 +245,8 @@ function LiveScreen() {
           </Banner>
         )}
         <RecognitionBanners />
+        {session.providerId === 'webspeech' && session.mode !== 'steno' && <SpeechDiagnostics />}
+        {session.providerId === 'whisper' && session.mode !== 'steno' && <WhisperDiagLine onUnlock={() => void getAudioContext().resume()} />}
       </div>
 
       {/* Transcript */}
@@ -253,7 +257,10 @@ function LiveScreen() {
               <Mic className="mb-3 size-8" />
               {session.mode === 'steno' ? <p className="font-medium text-text">{live.phase === 'paused' ? 'Paused' : 'Recording audio — type below'}</p> : <ListeningIndicator className="text-base" />}
               {session.mode !== 'steno' && live.providerStatus === 'listening' && session.providerId === 'webspeech' && <p className="mt-1 text-sm">Start speaking — words appear here as you talk (grey while provisional).</p>}
-              <p className="mt-1 max-w-sm text-sm">Current speaker: {current}. Tap the speaker button to change who is talking. Audio is saved every {settings.chunkSeconds}s.</p>
+              <p className="mt-1 max-w-sm text-sm">
+                Current speaker: {current}. Tap the speaker button to change who is talking.{' '}
+                {live.audioMode !== 'recording' ? 'Audio is not being recorded in this mode (transcription priority).' : `Audio is saved every ${settings.chunkSeconds}s.`}
+              </p>
             </div>
           ) : (
             visible.map((s) => (
@@ -300,7 +307,7 @@ function LiveScreen() {
           <div className="flex justify-center">
             <button
               type="button"
-              onClick={() => void (recording ? live.pause() : live.resume())}
+              onClick={() => { primeAudio(); void (recording ? live.pause() : live.resume()) }}
               disabled={live.phase === 'stopping'}
               aria-label={recording ? 'Pause recording' : 'Resume recording'}
               className={cn('flex size-16 items-center justify-center rounded-full text-white shadow-md transition-colors duration-200 [&_svg]:size-7', recording ? 'bg-primary' : 'bg-recording')}

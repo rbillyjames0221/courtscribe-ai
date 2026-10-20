@@ -14,6 +14,7 @@ class FakeSR implements SR {
   onend: (() => void) | null = null
   onstart: (() => void) | null = null
   onspeechstart: (() => void) | null = null
+  onaudiostart: (() => void) | null = null
   started = false
   aborted = false
   constructor() {
@@ -29,8 +30,9 @@ class FakeSR implements SR {
     this.aborted = true
   }
   // helpers
-  fireStart() {
+  fireStart(audio = true) {
     this.onstart?.()
+    if (audio) this.onaudiostart?.()
   }
   result(i: number, text: string, isFinal: boolean, confidence = 0.9) {
     const results: SREvent['results'] = { length: i + 1 }
@@ -198,5 +200,38 @@ describe('speech env', () => {
   it('language chains', () => {
     expect(langChain('en-PH')).toEqual(['en-PH', 'en-US'])
     expect(langChain('fil-PH')[0]).toBe('fil-PH')
+  })
+
+  it('does not claim Listening until the mic actually delivers audio', () => {
+    const { statuses, infos } = setup(android)
+    last().fireStart(false)
+    expect(statuses.some(([s]) => s === 'listening')).toBe(false)
+    vi.advanceTimersByTime(9000)
+    const e = statuses.find(([, er]) => er?.code === 'no-audio')
+    expect(e?.[0]).toBe('reconnecting')
+    expect(e?.[1]?.action).toMatch(/Diagnostics/)
+    expect(infos.some((i) => i.type === 'log' && i.entry.ev === 'no-audio')).toBe(true)
+    vi.advanceTimersByTime(300)
+    last().fireStart(true)
+    expect(statuses[statuses.length - 1][0]).toBe('listening')
+  })
+
+  it('flags a recognizer that keeps ending immediately without audio', () => {
+    const { statuses } = setup(android)
+    for (let k = 0; k < 5; k++) {
+      last().fireStart(false)
+      last().end()
+      vi.advanceTimersByTime(1000)
+    }
+    expect(statuses.some(([, er]) => er?.code === 'ends-immediately')).toBe(true)
+  })
+
+  it('logs every recognizer event for the diagnostics panel', () => {
+    const { infos } = setup()
+    last().fireStart()
+    last().result(0, 'hello', true)
+    last().end()
+    const evs = infos.filter((i) => i.type === 'log').map((i) => (i as { entry: { ev: string } }).entry.ev)
+    expect(evs).toEqual(['start()', 'onstart', 'onaudiostart', 'onresult', 'onend'])
   })
 })

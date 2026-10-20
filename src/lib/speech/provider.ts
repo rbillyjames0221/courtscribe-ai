@@ -12,13 +12,18 @@ export type ProviderStatus = 'idle' | 'connecting' | 'listening' | 'paused' | 'r
 
 export type ProviderError = { code: string; message: string; recoverable: boolean; action?: string }
 
+export type LogEntry = { t: number; run: number; ev: string; detail?: string }
+
 export type ProviderInfo =
   | { type: 'language'; lang: string; fallbackFrom?: string }
-  | { type: 'activity'; state: 'sound' | 'speech' | 'silence' }
+  | { type: 'activity'; state: 'idle' | 'sound' | 'speech' | 'silence' }
   | { type: 'no-speech'; count: number }
   | { type: 'mic-contention'; reason: string }
   | { type: 'model'; state: 'loading' | 'ready' | 'error'; loaded?: number; total?: number; message?: string }
   | { type: 'lag'; queued: number }
+  | { type: 'log'; entry: LogEntry }
+  | { type: 'rec-state'; started: boolean; audio: boolean; sound: boolean; speech: boolean; runs: number; results: number }
+  | { type: 'whisper-diag'; diag: import('./whisper').WhisperDiag }
 
 export type StartOptions = {
   language: Language
@@ -44,6 +49,8 @@ export interface SpeechProvider {
   onStatus(cb: (s: ProviderStatus, err?: ProviderError) => void): () => void
   /** Informational events (language fallback, speech activity, diagnostics). */
   onInfo(cb: (i: ProviderInfo) => void): () => void
+  flushBacklog(): void
+  status: ProviderStatus
   pause(): void
   resume(): void
   finishSession(): Promise<void>
@@ -90,8 +97,21 @@ export abstract class BaseProvider implements SpeechProvider {
   protected info(i: ProviderInfo) {
     for (const l of this.infoL) l(i)
   }
+  private backlog: ProviderResultWithHint[] = []
   protected emit(r: ProviderResultWithHint) {
-    for (const l of r.isFinal ? this.finalL : this.interimL) l(r)
+    const ls = r.isFinal ? this.finalL : this.interimL
+    if (!ls.size) {
+      // Nobody subscribed yet (recognizer pre-started inside the user's tap): keep until someone listens.
+      if (this.backlog.length < 200) this.backlog.push(r)
+      return
+    }
+    for (const l of ls) l(r)
+  }
+  /** Deliver results produced before listeners were attached. */
+  flushBacklog() {
+    const b = this.backlog
+    this.backlog = []
+    for (const r of b) this.emit(r)
   }
   protected setStatus(s: ProviderStatus, err?: ProviderError) {
     this.status = s

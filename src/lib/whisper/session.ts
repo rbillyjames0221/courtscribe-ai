@@ -1,7 +1,8 @@
 /** Post-recording / imported-audio transcription of a session's saved audio with on-device Whisper. */
 import { repo } from '../db'
 import { mergeProviderResult, sortSegments } from '../segments'
-import { decodeTo16k, rms, splitWindows, WHISPER_RATE } from '../audio/pcm'
+import { decodeTo16k } from '../audio/pcm'
+import { utterancesOf, type Utterance } from '../audio/vad'
 import type { AudioChunk, Language, Segment } from '../types'
 import { loadWhisper, transcribePcm, type WhisperDevice } from './client'
 import { whisperLanguage, type WhisperModelId } from './models'
@@ -20,7 +21,7 @@ export async function transcribeSessionAudio(
   // Each capture run is one independently decodable file (MediaRecorder header is in its first chunk).
   const runs = new Map<number, AudioChunk[]>()
   for (const c of chunks) runs.set(c.run, [...(runs.get(c.run) ?? []), c])
-  const plan: { pcm: Float32Array; offsetMs: number; windows: { start: number; end: number }[] }[] = []
+  const plan: Utterance[][] = []
   let total = 0
   o.onProgress?.({ phase: 'decoding', done: 0, total: 0, added: 0 })
   for (const [, list] of [...runs.entries()].sort((a, b) => a[0] - b[0])) {
@@ -32,9 +33,10 @@ export async function transcribeSessionAudio(
     } catch (e) {
       throw new Error(`Could not decode the saved audio (${(e as Error).message}). Try exporting the audio and importing it again.`)
     }
-    const windows = splitWindows(pcm)
-    total += windows.length
-    plan.push({ pcm, offsetMs: list[0].startMs, windows })
+    // Only speech goes to Whisper (silence/noise makes it invent text).
+    const utts = utterancesOf(pcm, list[0].startMs)
+    total += utts.length
+    plan.push(utts)
   }
   const session = await repo.getSession(sessionId)
   let segments = await repo.segments(sessionId)
@@ -45,15 +47,12 @@ export async function transcribeSessionAudio(
   // Live Whisper text and human-edited lines always count; live browser text counts only in "fill gaps" mode.
   const ignore = (s: Segment) => s.providerKey?.startsWith('wh:') === true && !s.userEdited ? true : !o.onlyGaps && s.source === 'stt' && s.engine !== 'whisper' && !s.userEdited
   const covered = (a: number, b: number) => coveredByOther(segments, a, b, ignore)
-  for (const run of plan) {
-    for (const w of run.windows) {
+  for (const utts of plan) {
+    for (const u of utts) {
       if (o.signal?.aborted) throw new DOMException('Cancelled', 'AbortError')
-      const startMs = run.offsetMs + (w.start / WHISPER_RATE) * 1000
-      const endMs = run.offsetMs + (w.end / WHISPER_RATE) * 1000
-      const energy = rms(run.pcm, w.start, w.end)
-      if (energy > 0.004 && !covered(startMs, endMs)) {
-        const out = await transcribePcm(run.pcm.slice(w.start, w.end), lang)
-        const results = whisperResults(out, { startMs, endMs, rms: energy }, 'wh', lang ?? 'auto').filter((r) => !covered(r.startMs, r.endMs))
+      if (!covered(u.startMs, u.endMs)) {
+        const out = await transcribePcm(u.pcm.slice(), lang)
+        const results = whisperResults(out, { startMs: u.startMs, endMs: u.endMs, rms: u.rms, mask: u.mask, speechMs: u.speechMs, noiseFloor: u.noiseFloor }, 'wh', lang ?? 'auto').filter((r) => !covered(r.startMs, r.endMs))
         const changed: string[] = []
         for (const r of results) {
           const m = mergeProviderResult(segments, r, { sessionId, speakerId: null, now: Date.now() })

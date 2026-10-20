@@ -1,4 +1,4 @@
-import { BaseProvider, type ProviderError, type StartOptions } from './provider'
+import { BaseProvider, type LogEntry, type ProviderError, type StartOptions } from './provider'
 import { langChain, speechEnv, type SpeechEnv } from './env'
 import type { Language } from '../types'
 
@@ -20,6 +20,9 @@ export interface SR {
   onsoundstart?: (() => void) | null
   onspeechstart?: (() => void) | null
   onspeechend?: (() => void) | null
+  onaudioend?: (() => void) | null
+  onsoundend?: (() => void) | null
+  onnomatch?: (() => void) | null
   start(): void
   stop(): void
   abort(): void
@@ -74,6 +77,16 @@ export class WebSpeechProvider extends BaseProvider {
   private restartTimer: ReturnType<typeof setTimeout> | null = null
   private watchdog: ReturnType<typeof setInterval> | null = null
   private lastFinalText = new Map<string, string>()
+  /** Per-run evidence: onstart only means the service accepted the request; onaudiostart means mic audio flows. */
+  private runAudio = false
+  private everAudio = false
+  private everSound = false
+  private everSpeech = false
+  private results = 0
+  private quickEnds: number[] = []
+  private noAudioWarned = 0
+  private spawnedAt = 0
+  readonly events: LogEntry[] = []
   private langIdx = 0
   private ctor: SRCtor | null
   private env: SpeechEnv
@@ -93,6 +106,16 @@ export class WebSpeechProvider extends BaseProvider {
 
   isSupported() {
     return this.ctor !== null && !this.env.inAppBrowser
+  }
+
+  private log(ev: string, detail?: string) {
+    const e: LogEntry = { t: Date.now(), run: this.run, ev, detail }
+    this.events.push(e)
+    if (this.events.length > 400) this.events.splice(0, this.events.length - 400)
+    this.info({ type: 'log', entry: e })
+  }
+  private publish() {
+    this.info({ type: 'rec-state', started: this.startedRun > 0, audio: this.everAudio, sound: this.everSound, speech: this.everSpeech, runs: this.run, results: this.results })
   }
 
   get language() {
@@ -123,6 +146,22 @@ export class WebSpeechProvider extends BaseProvider {
     if (!this.active || this.paused || !this.rec || this.restartTimer) return
     const idle = Date.now() - this.lastEventAt
     const started = this.startedRun === this.run
+    if (started && !this.runAudio && Date.now() - this.spawnedAt > 6000 && this.noAudioWarned < this.run) {
+      // The recognizer says it started but never reports mic audio: something else holds the mic,
+      // the speech service is broken, or Chrome refused audio for a non-gesture start.
+      this.noAudioWarned = this.run
+      this.log('no-audio', 'onstart fired but no onaudiostart after 6 s')
+      this.setStatus('reconnecting', {
+        code: 'no-audio',
+        message: 'Speech recognition started but is not receiving microphone audio.',
+        action: this.env.android
+          ? 'Close other apps that may use the mic (calls, voice recorder, Google Assistant / "Hey Google", other Chrome tabs), then tap Retry. If it persists, open Diagnostics → Speech test page and send the log.'
+          : 'Close other apps/tabs using the microphone, check the selected input device, then tap Retry.',
+        recoverable: true,
+      })
+      this.respawn(200)
+      return
+    }
     // Never got onstart within 8 s, or no event at all for 75 s (Chrome sometimes hangs without `end`).
     if ((!started && idle > 8000) || idle > 75_000) {
       if (!started) this.unstartedSpawns += 1
@@ -191,38 +230,71 @@ export class WebSpeechProvider extends BaseProvider {
     rec.interimResults = true
     rec.maxAlternatives = 1
     this.lastEventAt = Date.now()
+    this.spawnedAt = Date.now()
+    this.runAudio = false
+    this.log('start()', `lang=${rec.lang} continuous=${rec.continuous} interim=true visible=${typeof document === 'undefined' ? '?' : document.visibilityState}`)
     const touch = () => {
       this.lastEventAt = Date.now()
+    }
+    const gotAudio = () => {
+      if (!this.runAudio) {
+        this.runAudio = true
+        this.everAudio = true
+        this.setStatus('listening') // honest: only once the mic is actually delivering audio
+        this.publish()
+      }
     }
     rec.onstart = () => {
       if (run !== this.run) return
       touch()
+      this.log('onstart')
       this.startedRun = run
       this.unstartedSpawns = 0
-      this.setStatus('listening')
+      this.info({ type: 'activity', state: 'idle' })
+      this.publish()
     }
-    rec.onaudiostart = () => run === this.run && touch()
+    rec.onaudiostart = () => {
+      if (run !== this.run) return
+      touch()
+      this.log('onaudiostart')
+      gotAudio()
+    }
+    rec.onaudioend = () => run === this.run && this.log('onaudioend')
     rec.onsoundstart = () => {
       if (run !== this.run) return
       touch()
+      this.log('onsoundstart')
+      this.everSound = true
+      gotAudio()
       this.info({ type: 'activity', state: 'sound' })
     }
+    rec.onsoundend = () => run === this.run && this.log('onsoundend')
     rec.onspeechstart = () => {
       if (run !== this.run) return
       touch()
+      this.log('onspeechstart')
+      this.everSpeech = true
+      gotAudio()
       this.info({ type: 'activity', state: 'speech' })
     }
     rec.onspeechend = () => {
       if (run !== this.run) return
       touch()
+      this.log('onspeechend')
       this.info({ type: 'activity', state: 'silence' })
     }
+    rec.onnomatch = () => run === this.run && this.log('onnomatch', 'speech heard but not recognized')
     rec.onresult = (e) => {
       if (run !== this.run || !this.opts) return
       touch()
+      gotAudio()
       this.failures = 0
       this.noSpeech = 0
+      this.results += 1
       const now = this.opts.clock()
+      const r0 = e.results[e.results.length - 1]
+      this.log('onresult', `idx=${e.resultIndex}/${e.results.length} final=${!!r0?.isFinal} "${(r0?.[0]?.transcript ?? '').slice(0, 60)}"`)
+      if (this.results === 1) this.publish()
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const res = e.results[i]
         const alt = res?.[0]
@@ -246,6 +318,7 @@ export class WebSpeechProvider extends BaseProvider {
       if (run !== this.run) return
       touch()
       const err = this.handleError(e)
+      this.log('onerror', `${err.code}${(e as { message?: string }).message ? ` (${(e as { message?: string }).message})` : ''}`)
       if (err.code === 'aborted') return
       if (err.code === 'no-speech') {
         this.noSpeech += 1
@@ -274,8 +347,27 @@ export class WebSpeechProvider extends BaseProvider {
     }
     rec.onend = () => {
       if (run !== this.run) return
+      const lived = Date.now() - this.spawnedAt
+      this.log('onend', `after ${lived} ms${this.runAudio ? '' : ', no audio this run'}`)
       this.flushPending()
       if (!this.active || this.paused) return
+      // Ends within 1.5 s without audio, over and over = the recognizer can't get the mic / service.
+      if (!this.runAudio && lived < 1500) {
+        const now = Date.now()
+        this.quickEnds = [...this.quickEnds.filter((t) => now - t < 15_000), now]
+        if (this.quickEnds.length >= 5) {
+          this.quickEnds = []
+          this.failures = Math.max(this.failures, 3)
+          this.setStatus('reconnecting', {
+            code: 'ends-immediately',
+            message: 'Speech recognition keeps stopping right after it starts, without hearing audio.',
+            action: this.env.android
+              ? 'Usually another app has the mic, or the Google speech service is unavailable. Close other mic apps, make sure the Google app is enabled and updated, then tap Retry. Diagnostics → Speech test page shows the raw events.'
+              : 'Check the microphone and that no other tab/app is using it, then tap Retry.',
+            recoverable: true,
+          })
+        }
+      }
       // Chrome ends after silence / ~60 s (Android: after every utterance). Restart; back off only on failures.
       const delay = this.failures > 0 ? Math.min(8000, 300 * 2 ** Math.min(this.failures, 5)) : 100
       this.rec = null
@@ -288,6 +380,7 @@ export class WebSpeechProvider extends BaseProvider {
     try {
       rec.start()
     } catch (err) {
+      this.log('start() threw', String((err as Error)?.message ?? err))
       this.fail(this.handleError(err))
     }
   }

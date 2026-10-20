@@ -9,7 +9,9 @@ import { repo, storageEstimate } from '@/lib/db'
 import { LevelMeter, micPermissionState, openMic } from '@/lib/audio/capture'
 import { PROVIDERS, providerAvailability, type ProviderId } from '@/lib/speech'
 import { speechEnv } from '@/lib/speech/env'
-import { SpeechTest } from '@/components/SpeechTest'
+import { SpeechTest, stopSpeechTest } from '@/components/SpeechTest'
+import { primeAudio } from '@/lib/audio/pcm'
+import { prestartRecognition } from '@/store/live'
 import { fmtBytes } from '@/lib/time'
 import { useSettings } from '@/store/settings'
 import { useLive } from '@/store/live'
@@ -125,6 +127,10 @@ export default function NewSession() {
       return
     }
     stopTest()
+    stopSpeechTest()
+    // Inside the tap, before any await: mobile Chrome only reliably grants audio to work started by a gesture.
+    if (needsProvider && providerId === 'webspeech') prestartRecognition(language)
+    if (needsProvider && providerId === 'whisper') primeAudio()
     setStarting(true)
     setStartError(undefined)
     const now = Date.now()

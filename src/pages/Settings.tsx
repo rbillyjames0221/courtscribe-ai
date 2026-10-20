@@ -128,6 +128,7 @@ export default function Settings() {
           </Field>
           <p className="text-sm text-muted">Filipino and mixed English–Tagalog accuracy have not been benchmarked. Cloud providers (Google / Azure) run through a server-side seam that is not configured in this deployment.</p>
         </Advanced>
+        <a href="/diag/speech" className="inline-flex min-h-11 items-center text-sm text-interactive underline" data-testid="diag-link">Speech recognition test page (raw event log for troubleshooting)</a>
       </Group>
 
       <Group icon={<Cpu />} title="On-device transcription (Whisper)">

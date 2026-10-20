@@ -6,6 +6,13 @@ import type { Language } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
+let activeTest: WebSpeechProvider | null = null
+/** Stop the New Session speech test if it is still running (only one recognizer may own the mic). */
+export function stopSpeechTest() {
+  void activeTest?.finishSession()
+  activeTest = null
+}
+
 /** "Test speech recognition": runs the real browser recognizer and shows words live. */
 export function SpeechTest({ language, beforeStart }: { language: Language; beforeStart?: () => void }) {
   const ref = useRef<WebSpeechProvider | null>(null)
@@ -18,6 +25,7 @@ export function SpeechTest({ language, beforeStart }: { language: Language; befo
 
   const stop = () => {
     void ref.current?.finishSession()
+    if (activeTest === ref.current) activeTest = null
     ref.current = null
     setStatus('idle')
   }
@@ -31,6 +39,7 @@ export function SpeechTest({ language, beforeStart }: { language: Language; befo
     setInterim('')
     const p = new WebSpeechProvider()
     ref.current = p
+    activeTest = p
     const t0 = performance.now()
     p.onStatus((s, e) => {
       setStatus(s)
@@ -68,6 +77,7 @@ export function SpeechTest({ language, beforeStart }: { language: Language; befo
           {status === 'listening' ? (activity === 'speech' ? 'Hearing speech…' : 'Listening… say something') : status === 'connecting' ? 'Starting…' : status === 'reconnecting' ? 'Restarting…' : status === 'error' || status === 'unsupported' ? 'Not working' : 'Say a sentence to check that words appear live.'}
           {lang && running ? ` · ${lang}` : ''}
         </span>
+        <a href="/diag/speech" className="ml-auto text-xs text-interactive underline">Raw test page</a>
       </div>
       {(finals.length > 0 || interim) && (
         <p className="rounded-lg bg-surface-2 p-2.5 font-serif text-[1.05rem] leading-relaxed" data-testid="speech-test-text" aria-live="polite">

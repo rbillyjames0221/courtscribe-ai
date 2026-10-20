@@ -40,8 +40,11 @@ const FAKE_SR = () => {
       const mode = localStorage.getItem('fakeSR') || 'ok'
       window.__srStarts = (window.__srStarts || 0) + 1
       window.__srLang = this.lang
+      ;(window.__srActivation ||= []).push(!!navigator.userActivation?.isActive)
       setTimeout(() => {
         this.onstart?.()
+        if (mode === 'no-audio') return // the user's phone: started, then nothing at all
+        if (!(mode === 'silent-when-mic-busy' && live > 0) && mode !== 'not-allowed' && mode !== 'audio-capture') this.onaudiostart?.()
         if (mode === 'not-allowed' || mode === 'audio-capture') {
           this.onerror?.({ error: mode })
           setTimeout(() => this.onend?.(), 20)
@@ -187,6 +190,46 @@ if (ONLY === 'all' || ONLY === 'desktop') {
   console.log('   real recognizer status:', st, '| alert:', alert.join(' / ').replace(/\n/g, ' '))
   check(/Listening|Hearing|Not working|Restarting/.test(st), 'real recognizer state is visible')
   await c.ctx.close()
+}
+
+if (ONLY === 'all' || ONLY === 'android' || ONLY === 'diag') {
+  step('Android: recognizer starts inside the Start tap; honest status when no mic audio arrives')
+  const { ctx, page } = await newCtx(browser, { android: true, mode: 'no-audio' })
+  await ctx.grantPermissions(['microphone', 'clipboard-read', 'clipboard-write'], { origin: BASE })
+  await fillNewSession(page, 'No audio test')
+  await page.getByRole('button', { name: 'Start recording' }).click()
+  await page.waitForURL(/\/live\//)
+  const act = await page.evaluate(() => window.__srActivation)
+  check(act?.[0] === true, `first SpeechRecognition.start() ran with user activation (${JSON.stringify(act)})`)
+  await page.getByText('waiting for microphone audio').first().waitFor({ timeout: 5000 })
+  check((await page.getByText('Listening', { exact: true }).count()) === 0, 'header does not claim Listening without onaudiostart')
+  check(/✗\s*mic audio/.test(await page.getByTestId('speech-diag').innerText()), 'diagnostics shows mic audio ✗')
+  await page.getByText('not receiving microphone audio').first().waitFor({ timeout: 12000 })
+  check(true, 'no-audio warning banner shown')
+  check(/not being recorded/.test(await page.locator('main, body').first().innerText()), 'empty state copy says audio is not recorded in priority mode')
+  await page.getByTestId('speech-diag').getByRole('button').first().click()
+  await page.getByTestId('copy-log').click()
+  await page.waitForTimeout(500)
+  const clip = await page.evaluate(() => navigator.clipboard.readText()).catch((e) => 'readText failed ' + e.message)
+  if (!clip) console.log('   panel:', (await page.getByTestId('speech-diag').innerText()).slice(0, 600))
+  check(/onstart/.test(clip) && /no-audio/.test(clip) && /ua: /.test(clip), 'copied diagnostics contain env + event log')
+  console.log(clip.split('\n').slice(0, 14).map((l) => '     | ' + l).join('\n'))
+  await page.screenshot({ path: `${OUT}/12-android-no-audio-diag.png` })
+  await page.getByRole('button', { name: 'Stop', exact: true }).click()
+  await page.getByRole('button', { name: 'Stop and save' }).click()
+  await ctx.close()
+
+  step('Bare /diag/speech page logs raw recognizer events')
+  const d = await newCtx(browser, { android: true, mode: 'ok' })
+  await d.page.goto(BASE + '/diag/speech')
+  await d.page.getByTestId('diag-start').click()
+  await d.page.getByTestId('diag-text').filter({ hasText: 'good morning' }).waitFor({ timeout: 8000 })
+  await d.page.waitForTimeout(2500)
+  const log = await d.page.getByTestId('diag-log').innerText()
+  console.log(log.split('\n').map((l) => '     | ' + l).join('\n'))
+  check(/start\(\) called/.test(log) && /audiostart/.test(log) && /result/.test(log) && /end/.test(log), 'diag page shows start → audiostart → result → end')
+  await d.page.screenshot({ path: `${OUT}/13-diag-speech.png`, fullPage: true })
+  await d.ctx.close()
 }
 
 if (ONLY === 'all' || ONLY === 'whisper') {

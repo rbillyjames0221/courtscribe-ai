@@ -72,6 +72,26 @@ export function splitWindows(pcm: Float32Array, targetSec = 25, maxSec = 30, rat
   return out
 }
 
+let shared: AudioContext | null = null
+/** One AudioContext for on-device transcription. Create/resume it inside a tap (user gesture) so mobile Chrome lets it run. */
+export function getAudioContext(): AudioContext {
+  if (!shared || shared.state === 'closed') {
+    const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+    shared = new AC()
+  }
+  return shared
+}
+/** Call synchronously from a click/tap handler before any await. */
+export function primeAudio(): void {
+  try {
+    const ctx = getAudioContext()
+    if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
+  } catch {
+    /* no Web Audio */
+  }
+}
+
+const workletLoaded = new WeakSet<BaseAudioContext>()
 const WORKLET = `class Tap extends AudioWorkletProcessor{process(i){const c=i[0]&&i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor('cs-tap',Tap)`
 
 /**
@@ -94,8 +114,7 @@ export class PcmTap {
   ) {}
 
   async start() {
-    const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    const ctx = new AC()
+    const ctx = getAudioContext()
     this.ctx = ctx
     this.src = ctx.createMediaStreamSource(this.stream)
     const rate = ctx.sampleRate
@@ -108,12 +127,19 @@ export class PcmTap {
       if (this.len >= this.windowSec * WHISPER_RATE) this.flush()
     }
     try {
-      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }))
-      await ctx.audioWorklet.addModule(url)
-      URL.revokeObjectURL(url)
+      if (!workletLoaded.has(ctx)) {
+        const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }))
+        await ctx.audioWorklet.addModule(url)
+        URL.revokeObjectURL(url)
+        workletLoaded.add(ctx)
+      }
       const node = new AudioWorkletNode(ctx, 'cs-tap')
       node.port.onmessage = (e) => push(e.data as Float32Array)
       this.src.connect(node)
+      // Keep the graph pulled (some Chrome builds don't process unconnected worklets): route through a muted gain.
+      const mute = ctx.createGain()
+      mute.gain.value = 0
+      node.connect(mute).connect(ctx.destination)
       this.node = node
     } catch {
       const sp = ctx.createScriptProcessor(4096, 1, 1)
@@ -122,7 +148,15 @@ export class PcmTap {
       sp.connect(ctx.destination)
       this.node = sp
     }
-    if (ctx.state === 'suspended') await ctx.resume().catch(() => {})
+    if (ctx.state === 'suspended') await Promise.race([ctx.resume().catch(() => {}), new Promise((r) => setTimeout(r, 1500))])
+  }
+
+  /** 'running' when audio is flowing; 'suspended' means the browser blocked it until the next tap. */
+  get state(): AudioContextState | 'none' {
+    return this.ctx?.state ?? 'none'
+  }
+  resumeContext() {
+    return this.ctx?.resume()
   }
 
   flush() {
@@ -154,7 +188,6 @@ export class PcmTap {
     } catch {
       /* ignore */
     }
-    void this.ctx?.close().catch(() => {})
-    this.ctx = null
+    this.ctx = null // shared context stays open for the next session
   }
 }

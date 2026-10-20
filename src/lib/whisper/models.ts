@@ -14,9 +14,13 @@ export function whisperLanguage(lang: 'en-PH' | 'fil-PH' | 'mixed'): WhisperLang
 
 /** Typical Whisper hallucinations on silence/noise. Dropped when they are the whole output of a quiet window. */
 const HALLUCINATIONS = [
-  'thank you', 'thanks for watching', 'thank you for watching', 'please subscribe', 'you', 'bye', 'so', 'okay',
-  'subtitles by the amaraorg community', 'music', 'applause', 'blank audio', 'silence', 'inaudible',
+  'thank you', 'thank you very much', 'thank you so much', 'thanks', 'thanks for watching', 'thank you for watching',
+  'thanks for watching and see you next time', 'please subscribe', 'like and subscribe', 'subscribe to my channel',
+  'see you next time', 'see you in the next video', 'you', 'bye', 'bye bye', 'so', 'okay', 'oh', 'hmm', 'uh', 'um',
+  'subtitles by the amaraorg community', 'subtitles by', 'transcribed by', 'music', 'applause', 'laughter',
+  'blank audio', 'silence', 'inaudible', 'salamat', 'salamat po', 'maraming salamat',
 ]
+const HALLU_PATTERNS = [/subtitles? (by|from)/, /amara\s?org/, /thanks? for watching/, /(like|please) and subscribe/, /www\.|\.com\b/]
 
 export function cleanWhisperText(t: string): string {
   return t
@@ -29,6 +33,7 @@ export function cleanWhisperText(t: string): string {
 export function isLikelyHallucination(t: string, rms: number): boolean {
   const n = t.toLowerCase().replace(/[^\p{L}\s]/gu, '').replace(/\s+/g, ' ').trim()
   if (!n) return true
+  if (HALLU_PATTERNS.some((r) => r.test(t.toLowerCase()))) return true
   if (HALLUCINATIONS.includes(n) && rms < 0.03) return true
   // the same short phrase repeated many times
   const words = n.split(' ')

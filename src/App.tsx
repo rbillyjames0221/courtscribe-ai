@@ -13,6 +13,7 @@ const Review = lazy(() => import('@/pages/Review'))
 const ExportPage = lazy(() => import('@/pages/Export'))
 const Steno = lazy(() => import('@/pages/Steno'))
 const Settings = lazy(() => import('@/pages/Settings'))
+const DiagSpeech = lazy(() => import('@/pages/DiagSpeech'))
 
 class Boundary extends Component<{ children: ReactNode }, { error?: Error }> {
   state: { error?: Error } = {}
@@ -37,6 +38,7 @@ const S = ({ children }: { children: ReactNode }) => (
 )
 
 const router = createBrowserRouter([
+  { path: '/diag/speech', element: <S><DiagSpeech /></S> },
   {
     element: <AppShell />,
     errorElement: <div className="p-6"><ErrorState title="Page not found" action={<a href="/" className="text-interactive">Go home</a>} /></div>,
