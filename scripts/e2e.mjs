@@ -121,6 +121,7 @@ await p2.getByLabel('Shorthand practice pad').pressSequentially('yh, the sw is h
 console.log('   pad:', await p2.getByLabel('Shorthand practice pad').inputValue())
 await p2.screenshot({ path: `${OUT}/05-steno.png` })
 await p2.goto(BASE + '/settings')
+await p2.getByRole('heading', { name: 'Settings' }).waitFor()
 await p2.screenshot({ path: `${OUT}/06-settings.png` })
 // desktop layout
 const d = p2
